@@ -2,11 +2,6 @@ import { GoogleGenerativeAI, Content } from "@google/generative-ai";
 import { Message, LeadContexto } from "../types";
 import { findCampaignByDate } from "../data/campaigns";
 
-// Heuristica simple de genero a partir del primer nombre, para concordar
-// adjetivos/participios (conectado/conectada, etc.). No es perfecta -los
-// nombres no siempre lo dicen todo- pero cubre la gran mayoria de los casos
-// en español. Incluye excepciones comunes que la regla general ("termina en
-// -a = femenino") falla (Rocío, Consuelo... terminan en -o y son femeninos).
 const NOMBRES_FEMENINOS_EXCEPCION = new Set([
   'rocio', 'consuelo', 'amparo', 'socorro', 'dolores', 'carmen', 'pilar',
   'soledad', 'raquel', 'miriam', 'belen', 'ines', 'esther', 'ruth', 'noemi',
@@ -24,7 +19,7 @@ export function detectarGenero(nombreCompleto: string): Genero {
   const normalizado = primerNombre
     .toLowerCase()
     .normalize('NFD')
-    .replace(/[̀-ͯ]/g, ''); // quita tildes: 'María' -> 'maria'
+    .replace(/[̀-ͯ]/g, '');
 
   if (NOMBRES_FEMENINOS_EXCEPCION.has(normalizado)) return 'femenino';
   if (NOMBRES_MASCULINOS_EXCEPCION.has(normalizado)) return 'masculino';
@@ -32,9 +27,6 @@ export function detectarGenero(nombreCompleto: string): Genero {
   return normalizado.endsWith('a') ? 'femenino' : 'masculino';
 }
 
-// Convierte los datos opcionales de la encuesta/CRM en una frase que se le
-// pasa a Gemini como contexto, para que Miguel pueda referenciarlos de forma
-// natural (sin listarlos como una ficha) y la conversacion suene mas creible.
 function construirContextoTexto(contexto?: LeadContexto): string {
   if (!contexto) return '';
   const partes: string[] = [];
@@ -54,9 +46,6 @@ function construirContextoTexto(contexto?: LeadContexto): string {
   return ` Datos adicionales de la encuesta/CRM sobre este lead: ${partes.join('; ')}.`;
 }
 
-// Frase natural sobre cuanto tiempo ha pasado desde el directo, en vez de
-// forzar siempre "han pasado X días" (que ademas queda mal en singular: "1
-// días"). Cuantos mas dias han pasado, mas generica se vuelve la frase.
 function construirTextoTiempoTranscurrido(daysAgo: number): string {
   if (daysAgo <= 0) {
     return 'estuve hoy contigo en el directo';
@@ -166,6 +155,8 @@ export class SetterService {
 
   constructor() {
     const apiKey = (import.meta.env.VITE_GEMINI_API_KEY as string) || '';
+    console.log('[SetterService] Constructor called. API Key present:', !!apiKey);
+
     if (apiKey) {
       try {
         this.genAI = new GoogleGenerativeAI({ apiKey });
@@ -173,22 +164,27 @@ export class SetterService {
           model: 'gemini-2.5-flash',
           systemInstruction: SYSTEM_INSTRUCTION,
         });
+        console.log('[SetterService] GoogleGenerativeAI initialized successfully');
       } catch (err) {
-        console.warn("Could not initialize GoogleGenerativeAI with provided key", err);
+        console.error("[SetterService] Error initializing GoogleGenerativeAI:", err);
       }
+    } else {
+      console.warn("[SetterService] No API key found in VITE_GEMINI_API_KEY");
     }
   }
 
   private initChat(leadName: string, daysAgo: number, eventName: string, contexto?: LeadContexto) {
+    console.log(`[initChat] Starting chat for ${leadName}, ${daysAgo} days ago, event: ${eventName}`);
+
     this.currentLeadName = leadName;
     this.currentDaysAgo = daysAgo;
     this.currentEventName = eventName;
     this.currentContexto = contexto;
 
-    // Reinicializar el historial para nueva conversación
+    // Reinicializar el historial
     this.conversationHistory = [];
 
-    // Agregar el mensaje de contexto del lead al historial
+    // Agregar contexto al historial
     const contextMessage = `[Contexto del chat: El lead se llama ${leadName} (género detectado por el nombre: ${detectarGenero(leadName)}) y asistió a los directos de ${eventName}.${construirContextoTexto(contexto)} Si escribes adjetivos o participios que cambian según género (conectado/conectada, seguro/segura, etc.), usa el género detectado; si el nombre es ambiguo, usa lenguaje neutro. Si hay datos adicionales, úsalos de forma sutil y natural para personalizar la charla y sonar más creíble -nunca los recites como una ficha ni los menciones todos de golpe.]`;
 
     this.conversationHistory.push({
@@ -196,12 +192,14 @@ export class SetterService {
       parts: [{ text: contextMessage }],
     });
 
-    // Agregar la respuesta inicial del modelo
+    // Respuesta inicial
     const initialText = buildInitialMessage(leadName, daysAgo, eventName);
     this.conversationHistory.push({
       role: 'model',
       parts: [{ text: initialText }],
     });
+
+    console.log('[initChat] Chat initialized with history length:', this.conversationHistory.length);
   }
 
   async startConversation(
@@ -210,6 +208,7 @@ export class SetterService {
     eventName: string = 'los Juegos de Invierno de Excel',
     contexto?: LeadContexto
   ): Promise<Message> {
+    console.log('[startConversation] Called');
     this.initChat(leadName, daysAgo, eventName, contexto);
     const initialText = buildInitialMessage(leadName, daysAgo, eventName);
 
@@ -222,19 +221,26 @@ export class SetterService {
   }
 
   async sendMessage(text: string): Promise<Message> {
+    console.log('[sendMessage] User message:', text);
+
     if (!this.model) {
+      console.warn('[sendMessage] Model not initialized, attempting initialization...');
+
       const apiKey = (import.meta.env.VITE_GEMINI_API_KEY as string) || '';
       if (!apiKey) {
+        console.error('[sendMessage] No API key available');
         return this.getFallbackResponse(text);
       }
+
       try {
         this.genAI = new GoogleGenerativeAI({ apiKey });
         this.model = this.genAI.getGenerativeModel({
           model: 'gemini-2.5-flash',
           systemInstruction: SYSTEM_INSTRUCTION,
         });
+        console.log('[sendMessage] Model initialized');
       } catch (err) {
-        console.warn("Could not initialize GoogleGenerativeAI", err);
+        console.error("[sendMessage] Error initializing model:", err);
         return this.getFallbackResponse(text);
       }
     }
@@ -242,54 +248,75 @@ export class SetterService {
     const maxIntentos = 2;
     for (let intento = 1; intento <= maxIntentos; intento++) {
       try {
-        // Agregar el mensaje del usuario al historial
+        console.log(`[sendMessage] API call attempt ${intento}/${maxIntentos}`);
+        console.log('[sendMessage] History length before:', this.conversationHistory.length);
+
+        // Agregar mensaje del usuario
         this.conversationHistory.push({
           role: 'user',
           parts: [{ text }],
         });
 
-        // Llamar a generateContent con el historial completo
-        // El systemInstruction ya está definido en el modelo, así que se incluye automáticamente
+        console.log('[sendMessage] Calling generateContent with history:', this.conversationHistory.length, 'messages');
+
+        // Llamar a la API
         const response = await this.model.generateContent({
           contents: this.conversationHistory,
         });
 
-        const modelResponse = response.response.text();
+        console.log('[sendMessage] API response received');
 
-        // Agregar la respuesta del modelo al historial
+        if (!response.response) {
+          throw new Error('No response object from API');
+        }
+
+        const modelText = response.response.text();
+        console.log('[sendMessage] Model response:', modelText.substring(0, 100) + '...');
+
+        if (!modelText) {
+          throw new Error('Empty response text from API');
+        }
+
+        // Agregar respuesta al historial
         this.conversationHistory.push({
           role: 'model',
-          parts: [{ text: modelResponse }],
+          parts: [{ text: modelText }],
         });
 
-        return this.processResponse(modelResponse);
+        console.log('[sendMessage] Successfully processed response');
+        return this.processResponse(modelText);
+
       } catch (error) {
         const esUltimoIntento = intento === maxIntentos;
         console.error(
-          `Gemini API call failed (intento ${intento}/${maxIntentos})${esUltimoIntento ? ', usando fallback' : ', reintentando'}`,
+          `[sendMessage] API call failed (intento ${intento}/${maxIntentos}):`,
           error
         );
 
-        // Remover el último mensaje del usuario del historial si falló
+        // Remover el último mensaje del usuario si falló
         if (this.conversationHistory[this.conversationHistory.length - 1]?.role === 'user') {
           this.conversationHistory.pop();
+          console.log('[sendMessage] Removed last user message from history');
         }
 
         if (!esUltimoIntento) {
+          console.log('[sendMessage] Waiting 1500ms before retry...');
           await new Promise(resolve => setTimeout(resolve, 1500));
         }
       }
     }
 
+    console.warn('[sendMessage] All API attempts failed, using fallback');
     return this.getFallbackResponse(text);
   }
 
   private getFallbackResponse(userInput: string): Message {
+    console.log('[getFallbackResponse] Using fallback for input:', userInput.substring(0, 50) + '...');
+
     const lower = userInput.toLowerCase();
     let replyText = "";
     let productCard: Message['productCard'] = undefined;
 
-    // Check if user specified a date (e.g., DD/MM/YYYY or DD-MM-YYYY)
     const dateMatch = userInput.match(/\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/);
     if (dateMatch) {
       const detected = findCampaignByDate(dateMatch[0]);
