@@ -1,0 +1,10 @@
+{
+  "name": "Excel Digital Setter AI",
+  "description": "Asistente digital de ventas y setter para Excel y Finanzas, con la identidad de Miguel (MVP de Microsoft Excel y CEO de ExcelyFinanzas) para atender y entender a los alumnos tras los directos.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
