@@ -1,5 +1,4 @@
-
-import { GoogleGenAI, Chat } from "@google/genai";
+import { GoogleGenerativeAI, Content } from "@google/generative-ai";
 import { Message, LeadContexto } from "../types";
 import { findCampaignByDate } from "../data/campaigns";
 
@@ -25,7 +24,7 @@ export function detectarGenero(nombreCompleto: string): Genero {
   const normalizado = primerNombre
     .toLowerCase()
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, ''); // quita tildes: 'María' -> 'maria'
+    .replace(/[̀-ͯ]/g, ''); // quita tildes: 'María' -> 'maria'
 
   if (NOMBRES_FEMENINOS_EXCEPCION.has(normalizado)) return 'femenino';
   if (NOMBRES_MASCULINOS_EXCEPCION.has(normalizado)) return 'masculino';
@@ -156,8 +155,10 @@ Si el usuario menciona una fecha, reconoce inmediatamente a qué lanzamiento asi
 `;
 
 export class SetterService {
-  private chat: Chat | null = null;
-  private ai: GoogleGenAI | null = null;
+  private genAI: GoogleGenerativeAI | null = null;
+  private model: any = null;
+  private conversationHistory: Content[] = [];
+
   private currentLeadName: string = 'Juan';
   private currentDaysAgo: number = 4;
   private currentEventName: string = 'los Juegos de Invierno de Excel';
@@ -167,9 +168,13 @@ export class SetterService {
     const apiKey = (import.meta.env.VITE_GEMINI_API_KEY as string) || '';
     if (apiKey) {
       try {
-        this.ai = new GoogleGenAI({ apiKey });
+        this.genAI = new GoogleGenerativeAI({ apiKey });
+        this.model = this.genAI.getGenerativeModel({
+          model: 'gemini-2.5-flash',
+          systemInstruction: SYSTEM_INSTRUCTION,
+        });
       } catch (err) {
-        console.warn("Could not initialize GoogleGenAI with provided key", err);
+        console.warn("Could not initialize GoogleGenerativeAI with provided key", err);
       }
     }
   }
@@ -180,42 +185,23 @@ export class SetterService {
     this.currentEventName = eventName;
     this.currentContexto = contexto;
 
-    if (!this.ai) {
-      const apiKey = (import.meta.env.VITE_GEMINI_API_KEY as string) || '';
-      if (apiKey) {
-        try {
-          this.ai = new GoogleGenAI({ apiKey });
-        } catch (err) {
-          console.warn("Could not initialize GoogleGenAI", err);
-        }
-      }
-    }
+    // Reinicializar el historial para nueva conversación
+    this.conversationHistory = [];
 
-    if (this.ai) {
-      try {
-        const initialText = buildInitialMessage(leadName, daysAgo, eventName);
-        this.chat = this.ai.chats.create({
-          model: 'gemini-2.5-flash',
-          config: {
-            systemInstruction: SYSTEM_INSTRUCTION,
-            temperature: 0.7,
-          },
-          history: [
-            {
-              role: 'user',
-              parts: [{ text: `[Contexto del chat: El lead se llama ${leadName} (género detectado por el nombre: ${detectarGenero(leadName)}) y asistió a los directos de ${eventName}.${construirContextoTexto(contexto)} Si escribes adjetivos o participios que cambian según género (conectado/conectada, seguro/segura, etc.), usa el género detectado; si el nombre es ambiguo, usa lenguaje neutro. Si hay datos adicionales, úsalos de forma sutil y natural para personalizar la charla y sonar más creíble -nunca los recites como una ficha ni los menciones todos de golpe.]` }],
-            },
-            {
-              role: 'model',
-              parts: [{ text: initialText }],
-            },
-          ],
-        });
-      } catch (e) {
-        console.warn("Failed to create Gemini chat session, falling back to local handler", e);
-        this.chat = null;
-      }
-    }
+    // Agregar el mensaje de contexto del lead al historial
+    const contextMessage = `[Contexto del chat: El lead se llama ${leadName} (género detectado por el nombre: ${detectarGenero(leadName)}) y asistió a los directos de ${eventName}.${construirContextoTexto(contexto)} Si escribes adjetivos o participios que cambian según género (conectado/conectada, seguro/segura, etc.), usa el género detectado; si el nombre es ambiguo, usa lenguaje neutro. Si hay datos adicionales, úsalos de forma sutil y natural para personalizar la charla y sonar más creíble -nunca los recites como una ficha ni los menciones todos de golpe.]`;
+
+    this.conversationHistory.push({
+      role: 'user',
+      parts: [{ text: contextMessage }],
+    });
+
+    // Agregar la respuesta inicial del modelo
+    const initialText = buildInitialMessage(leadName, daysAgo, eventName);
+    this.conversationHistory.push({
+      role: 'model',
+      parts: [{ text: initialText }],
+    });
   }
 
   async startConversation(
@@ -236,32 +222,65 @@ export class SetterService {
   }
 
   async sendMessage(text: string): Promise<Message> {
-    if (this.chat) {
-      // Los errores 503 "high demand" de Gemini suelen ser puntuales y se
-      // resuelven solos en un par de segundos, asi que antes de rendirnos y
-      // caer al fallback fijo (que siempre suena igual, venga lo que venga
-      // del lead) reintentamos una vez mas con una pequeña espera.
-      const maxIntentos = 2;
-      for (let intento = 1; intento <= maxIntentos; intento++) {
-        try {
-          const response = await this.chat.sendMessage({ message: text });
-          if (response.text) {
-            return this.processResponse(response.text);
-          }
-        } catch (error) {
-          const esUltimoIntento = intento === maxIntentos;
-          console.error(
-            `Gemini API call failed (intento ${intento}/${maxIntentos})${esUltimoIntento ? ', usando fallback' : ', reintentando'}`,
-            error
-          );
-          if (!esUltimoIntento) {
-            await new Promise(resolve => setTimeout(resolve, 1500));
-          }
+    if (!this.model) {
+      const apiKey = (import.meta.env.VITE_GEMINI_API_KEY as string) || '';
+      if (!apiKey) {
+        return this.getFallbackResponse(text);
+      }
+      try {
+        this.genAI = new GoogleGenerativeAI({ apiKey });
+        this.model = this.genAI.getGenerativeModel({
+          model: 'gemini-2.5-flash',
+          systemInstruction: SYSTEM_INSTRUCTION,
+        });
+      } catch (err) {
+        console.warn("Could not initialize GoogleGenerativeAI", err);
+        return this.getFallbackResponse(text);
+      }
+    }
+
+    const maxIntentos = 2;
+    for (let intento = 1; intento <= maxIntentos; intento++) {
+      try {
+        // Agregar el mensaje del usuario al historial
+        this.conversationHistory.push({
+          role: 'user',
+          parts: [{ text }],
+        });
+
+        // Llamar a generateContent con el historial completo
+        // El systemInstruction ya está definido en el modelo, así que se incluye automáticamente
+        const response = await this.model.generateContent({
+          contents: this.conversationHistory,
+        });
+
+        const modelResponse = response.response.text();
+
+        // Agregar la respuesta del modelo al historial
+        this.conversationHistory.push({
+          role: 'model',
+          parts: [{ text: modelResponse }],
+        });
+
+        return this.processResponse(modelResponse);
+      } catch (error) {
+        const esUltimoIntento = intento === maxIntentos;
+        console.error(
+          `Gemini API call failed (intento ${intento}/${maxIntentos})${esUltimoIntento ? ', usando fallback' : ', reintentando'}`,
+          error
+        );
+
+        // Remover el último mensaje del usuario del historial si falló
+        if (this.conversationHistory[this.conversationHistory.length - 1]?.role === 'user') {
+          this.conversationHistory.pop();
+        }
+
+        if (!esUltimoIntento) {
+          await new Promise(resolve => setTimeout(resolve, 1500));
         }
       }
     }
 
-    // Intelligent fallback as Miguel MVP in case of API issues or missing key
     return this.getFallbackResponse(text);
   }
 
@@ -343,4 +362,3 @@ Cuéntame qué tareas haces en tu trabajo o qué duda te quedó tras los directo
 }
 
 export const setterService = new SetterService();
-
